@@ -4,9 +4,9 @@
 
 A complete engineering record and working build that revives a Xiaomi Quick Game package — *Gun Qiu Xiang Qian Chong* (a 3D ball-rolling game on LayaAir 2.1.1.1, original package just 3.45 MB) — into a playable webpage inside a Windows browser.
 
-> This repo ships two kinds of content:
-> - **Game source files** (`游戏源文件/`): the raw unpacked content (main.js, res/, assets, and the original manifest.json) with **no** revival patches — exactly what you get by unzipping the `.apk` (which is really a renamed ZIP).
-> - **Ready-to-play build** (`开箱即玩版/`): the game source files plus the browser bridge `index.html` and two launcher bats — double-click and play.
+> This repo contains only the **revival bridge code and docs**. The full game packages are published as **Releases** — download them from the repo's Releases page:
+> - **游戏源文件.zip** (Game source files): the raw unpacked content (main.js, res/, assets, and the original manifest.json) with **no** revival patches — exactly what you get by unzipping the `.apk` (which is really a renamed ZIP).
+> - **开箱即玩版.zip** (Ready-to-play build): the game source files plus the browser bridge `index.html` and two launcher bats — unzip and double-click to play.
 
 ## What is this
 
@@ -18,7 +18,7 @@ A complete engineering record and working build that revives a Xiaomi Quick Game
 
 ## How to run (ready-to-play build)
 
-Enter `开箱即玩版/`, then double-click one of the two launchers (both auto-start a local server and open the game page; the server runs in a minimized command window — just close it when done):
+From the repo's **Releases** page download `开箱即玩版.zip`; after unzipping you get an `开箱即玩版/` folder. Enter that folder, then double-click one of the two launchers (both auto-start a local server and open the game page; the server runs in a minimized command window — just close it when done):
 
 | Launcher | Purpose |
 |---|---|
@@ -106,8 +106,10 @@ The console also prints an entry version (`[滚球向前冲] 本地 Web 入口�
 
 ```
 .
-├── 游戏源文件/               # Raw unpacked: main.js, res/, Font/, manifest.json, etc. (no patches)
-├── 开箱即玩版/               # Game source + index.html + two launcher bats + 现场取证-不了谢谢.js
+├── index.html                # Browser bridge (four fixes + F9 diagnostics), the revival patch itself
+├── 开始游戏（读取进度）.bat   # Launcher: read existing save
+├── 开始游戏（重置进度）.bat   # Launcher: clear save then launch
+├── 现场取证-不了谢谢.js        # On-site evidence script (the "No Thanks" dead-click diagnostic)
 ├── verify_gqxqc.py           # Verify: launch → enter level, full chain
 ├── play_final2.py            # Verify: full level run
 ├── diag_bridge.py            # Diagnose: did the input bridge find the canvas
@@ -118,6 +120,8 @@ The console also prints an entry version (`[滚球向前冲] 本地 Web 入口�
 ├── README.md                 # This file's Chinese counterpart
 └── README.en.md              # English
 ```
+
+> The game source files and ready-to-play build are published as release attachments (`游戏源文件.zip` / `开箱即玩版.zip`); download them from the repo's **Releases** page — they are not in the code tree.
 
 ## Verification
 
