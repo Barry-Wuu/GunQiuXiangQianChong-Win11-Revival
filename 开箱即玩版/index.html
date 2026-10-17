@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<!--
+  LayaAir 小游戏包 → PC 浏览器 的入口模板。
+  把本文件另存为 <游戏目录>/index.html，改 <title>，确保 <script src="main.js"> 存在。
+  *** 所有垫片脚本必须在 main.js 之前 ***
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>滚球向前冲 (本地 Web 版)</title>
+
+<!-- 必须放 head：否则浏览器会先请求 /favicon.ico 拿 404 -->
+<link rel="icon" href="data:,">
+
+<!--
+  重置进度：URL 带 ?reset=1 时清空存档（"开始游戏（重置进度）.bat" 用它）。
+  必须在 main.js **之前** 执行，否则游戏已经把旧存档读进内存了。
+  存档键就一个：localStorage["userData"]；__TD_* 是埋点、deviceId 是设备号，都不动。
+-->
+<script>
+(function(){
+  try{
+    if (/[?&]reset=1(&|$)/.test(location.search)){
+      try{ localStorage.removeItem('userData'); }catch(e){}
+      try{ history.replaceState(null, '', location.pathname); }catch(e){}
+    }
+  }catch(e){}
+})();
+</script>
+
+<!-- 控制台降噪（不影响玩法） -->
+<script>
+(function(){
+  // 1) Laya 用内部 2D canvas 缓存字体位图（getCharBmp/getImageData），Chrome 会告警
+  //    "Multiple readback operations ... willReadFrequently"。给「无 id 的内部 canvas」
+  //    默认加 willReadFrequently 即可；刻意跳过带 id 的 canvas（主画布），避免失去 GPU 合成。
+  try{
+    var _gc = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function(type, attrs){
+      if (type === '2d' && !this.id){
+        attrs = attrs || {};
+        if (attrs.willReadFrequently === undefined) attrs.willReadFrequently = true;
+      }
+      return _gc.call(this, type, attrs);
+    };
+  }catch(e){}
+
+  // 2) 已下线的埋点域名（按项目替换）直接吞掉，消除 ERR_NAME_NOT_RESOLVED
+  try{
+    var DEAD_HOST = /(^|\.)udrig\.com$/i;
+    var _open = XMLHttpRequest.prototype.open;
+    var _send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(m, u){
+      try{ this.__url = '' + u; }catch(e){}
+      return _open.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(){
+      var host = '';
+      try{ host = (''+this.__url).split('/')[2] || ''; host = host.split(':')[0]; }catch(e){}
+      if (host && DEAD_HOST.test(host)){
+        var self = this;
+        if (self.onerror) setTimeout(function(){ try{ self.onerror({}); }catch(e){} }, 0);
+        return;
+      }
+      return _send.apply(this, arguments);
+    };
+  }catch(e){}
+})();
+</script>
+
+<!--
+  ============================================================================
+  桌面浏览器画布适配 —— 纯 CSS，必须在 <style> 里（不能改用 JS，见下）
+  ============================================================================
+  1) 小游戏构建从**不给画布设 CSS 尺寸**（平台上由平台呈现），只设后备缓冲 =
+     等比适配后的逻辑尺寸 × dpr。浏览器按缓冲像素 1:1 显示 -> 比视口大 dpr 倍、被裁。
+  2) main.js 会包装 window.document / getElementsByTagName / Element 原型，
+     页面 JS 里拿到的 canvas 不是真 DOM 节点（nodeType/style/parentNode 全 null，
+     bbox 的 x/y 是 NaN）-> **从 JS 写 style 落不到真元素上**，只能用 CSS。
+  3) R 是设计宽/设计高（本模板按竖屏 720x1280 取 0.5625），换游戏要重算。
+  4) Laya 字体位图画布的尺寸（此包 1024x512）从真实 DOM 里读出来写死在选择器里；
+     不排除它的话，它会被一起放大居中盖在画面上。
+  5) 渲染画布在 #layaContainer 里，**不是 body 直接子节点**，别写 body > canvas。
+-->
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden; }
+
+  /* 解掉文档流挤压：否则占满首屏的 #layaCanvas 会把渲染画布顶到第二屏 */
+  body canvas { position:absolute; }
+
+  /* 真渲染画布：按设计比等比缩放到视口内并居中（scaleMode=showall 的 CSS 版） */
+  canvas:not(#layaCanvas):not([width="1024"][height="512"]) {
+    left: 50% !important;
+    top: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    width: min(100vw, calc(100vh * 0.5625)) !important;   /* 0.5625 = 720/1280 */
+    height: auto !important;
+    aspect-ratio: 720 / 1280;
+    margin: 0 !important;
+  }
+
+  /* 本页自留的空 #layaCanvas + Laya 字体位图画布：推到屏幕外并缩到 1px */
+  #layaCanvas,
+  canvas[width="1024"][height="512"] {
+    left: -10000px !important;
+    top: 0 !important;
+    width: 1px !important;
+    height: 1px !important;
+  }
+</style>
+</head>
+<body>
+<canvas id="layaCanvas"></canvas>
+
+<!--
+  小游戏运行时垫片：基于浏览器 HTTP 实现 qg.*。
+  铁律 1：必须在 main.js 之前（main.js 的模块求值阶段就裸调 qg.*）
+  铁律 2：绝不定义 getApp / GameGlobal（否则反向激活 KGMiniAdapter，抢走加载器）
+-->
+<script>
+(function(){
+  if (typeof getApp !== 'undefined') return;       // 真·小游戏环境：不覆盖
+  if (typeof window.qg !== 'undefined') return;    // 已存在：不覆盖
+  var USER_DATA = 'webcache';
+
+  function xhr(url, binary, ok, err){
+    try{
+      var x = new XMLHttpRequest();
+      x.open('GET', url, true);
+      if (binary) x.responseType = 'arraybuffer';
+      x.onload = function(){
+        if (x.status >= 200 && x.status < 300) ok(binary ? x.response : x.responseText);
+        else err({ errMsg: 'HTTP ' + x.status, statusCode: x.status });
+      };
+      x.onerror = function(){ err({ errMsg: 'network error' }); };
+      x.timeout = 30000;
+      x.send();
+    }catch(e){ err({ errMsg: '' + e }); }
+  }
+
+  // 文本/二进制判定：文本类必须返回字符串，二进制必须返回 ArrayBuffer
+  function isText(p, enc){
+    if (enc && /utf-?8/i.test(enc)) return true;
+    return /\.(json|atlas|txt|xml|plist|fnt|sk)$/i.test(p);
+  }
+
+  var fsm = {
+    readFile: function(o){
+      o = o || {};
+      var p = '' + (o.filePath || '');
+      if (!p || p.indexOf(USER_DATA) >= 0){        // 本地缓存路径：未命中 -> 让上层回退下载
+        if (o.fail) o.fail({ errMsg: 'file not cached' });
+        return;
+      }
+      var text = isText(p, o.encoding);
+      xhr(p, !text, function(d){
+        if (o.success) o.success({ data: d });     // 形状必须是 {data: 内容}
+      }, function(e){ if (o.fail) o.fail(e); });
+    },
+    readFileSync: function(){ throw new Error('no local cache'); },
+    writeFile: function(o){ if (o && o.success) o.success({}); },
+    appendFile: function(o){ if (o && o.success) o.success({}); },
+    unlink: function(o){ if (o && o.success) o.success({}); },
+    mkdir: function(o){ if (o && o.success) o.success({}); },
+    rmdir: function(o){ if (o && o.success) o.success({}); },
+    copyFile: function(o){ if (o && o.success) o.success({}); },
+    access: function(o){ if (o && o.fail) o.fail({ errMsg: 'no access' }); },
+    stat: function(o){ if (o && o.fail) o.fail({ errMsg: 'no stat' }); },
+    getFileInfo: function(o){ if (o && o.fail) o.fail({ errMsg: 'no info' }); },
+    unzip: function(o){ if (o && o.fail) o.fail({ errMsg: 'unzip unsupported' }); }
+  };
+
+  function noop(){ return undefined; }
+  function chain(){
+    var o = {};
+    ['show','hide','load','destroy','pause','resume','close','play','stop','seek','abort','offLoad','offError','offClose','offShow','offHide']
+      .forEach(function(k){ o[k] = function(){ return o; }; });
+    ['onLoad','onError','onClose','onShow','onHide','onPlay','onPause','onStop','onEnded','onCanplay','onTimeUpdate','onResize','onProgressUpdate']
+      .forEach(function(k){ o[k] = function(){ return o; }; });
+    return o;
+  }
+  function audioObj(){ var o = chain(); o.src=''; o.autoplay=false; o.loop=false; o.volume=1; o.currentTime=0; o.duration=0; o.paused=true; return o; }
+
+  var sysInfo = {
+    platform:'web', system:'web', brand:'web', model:'web', language:'zh_CN', version:'1.0.0',
+    screenWidth:(window.screen&&screen.width)||1280, screenHeight:(window.screen&&screen.height)||720,
+    windowWidth:window.innerWidth, windowHeight:window.innerHeight,
+    devicePixelRatio:window.devicePixelRatio||1, pixelRatio:window.devicePixelRatio||1,
+    statusBarHeight:0,
+    safeArea:{top:0,left:0,right:window.innerWidth,bottom:window.innerHeight,width:window.innerWidth,height:window.innerHeight}
+  };
+
+  var qg = {
+    env: { USER_DATA_PATH: USER_DATA },
+    getFileSystemManager: function(){ return fsm; },
+    downloadFile: function(o){
+      o = o || {};
+      var url = o.url || '';
+      var handle = { onProgressUpdate:function(){ return handle; }, abort:function(){} };
+      xhr(url, true, function(){
+        if (o.success) o.success({ statusCode:200, tempFilePath:url, headers:{} });
+      }, function(e){ if (o.fail) o.fail(e); });
+      return handle;
+    },
+    getSystemInfoSync: function(){ return sysInfo; },
+    getSystemInfo: function(o){ if (o && o.success) o.success(sysInfo); },
+    createInnerAudioContext: audioObj,
+    getOpenDataContext: function(){ return chain(); },
+    createBannerAd:chain, createInsertAd:chain, createInterstitialAd:chain, createNativeAd:chain, createRewardedVideoAd:chain,
+    initAdService:noop, navigateToMiniGame:noop, reportMonitor:noop, exitMiniProgram:noop,
+    hasShortcutInstalled:function(cb){ if(cb&&cb.success)cb.success({status:false}); else if(cb)cb({status:false}); },
+    installShortcut:noop,
+    loadSubpackage:function(o){ if(o){ if(o.success)o.success(); if(o.complete)o.complete(); } },
+    showToast:noop, vibrateShort:noop, hideKeyboard:noop, showKeyboard:noop,
+    onKeyboardConfirm:noop, offKeyboardConfirm:noop, onKeyboardInput:noop, offKeyboardInput:noop,
+    onMessage:noop, postMessage:noop, onWindowResize:noop, offWindowResize:noop,
+    onShow:noop, onHide:noop, offShow:noop, offHide:noop, onError:noop, offError:noop,
+    getPerformance: undefined,   // 故意 undefined：让引擎跳过迷你游戏性能分支
+    storage:{ getSync:function(){ return null; }, setSync:noop, removeSync:noop, clearSync:noop, getInfoSync:function(){ return {}; } }
+  };
+
+  window.qg = new Proxy(qg, {
+    get:function(t,p){
+      if (typeof p === 'symbol') return undefined;
+      if (p in t) return t[p];
+      return function(){ return undefined; };    // 未知方法兜底
+    }
+  });
+})();
+</script>
+
+<!-- 其它平台裸全局兜底。getCurrentPage 是画布工厂依赖，必须返回页面主画布 -->
+<script>
+(function(){
+  if (typeof getApp !== 'undefined') return;
+  window.getCurrentPage = function(){
+    return { getCanvas: function(){ return document.getElementById('layaCanvas') || document.createElement('canvas'); } };
+  };
+  function MP(){
+    var f = function(){ return MP(); };
+    return new Proxy(f, {
+      get:function(t,p){
+        if (typeof p === 'symbol') return undefined;
+        if (p === 'then') return undefined;
+        return MP();
+      },
+      apply:function(){ return MP(); }
+    });
+  }
+  ['wx','qq','tt','swan','my'].forEach(function(g){
+    if (typeof window[g] === 'undefined') window[g] = MP();
+  });
+})();
+</script>
+
+<!-- 引擎 + 游戏逻辑：自动执行 Laya.init -> ResourceVersion -> AtlasInfoManager -> 首屏 -->
+<script src="main.js"></script>
+
+<!--
+  必须在 main.js **之后**：入口会同步设 screenMode='vertical'（手机竖屏设计），
+  在横向桌面窗口里 Laya 会把整块画布旋转 90°（canvasDegree=-90）。
+
+  ① 关掉竖屏旋转（只动 stage 参数）
+  ② 输入坐标矩阵按实际 CSS 显示尺寸重设（否则越靠右下越偏，角落按钮点不中）
+     ★★ 同一处还要把 stage 自身的 _transform 归一 —— 见下面的长注释（这是
+        「屏幕下半部分点击全丢」的真根因）
+  ③ ★ 输入桥接：把真实鼠标/触摸事件翻译进 Laya 的「迷你 DOM 画布」
+     （画面正常但按钮点不动 = 这个包把 DOM 换成迷你 DOM，没人往迷你画布喂事件）
+  画布的 CSS 尺寸/居中交给上面的 <style>，这里不碰 DOM。
+-->
+<script>
+(function(){
+  // ---------------- ① 关掉竖屏旋转 ----------------
+  function tune(){
+    if (typeof Laya === 'undefined' || !Laya.stage) return false;
+    try {
+      if (Laya.stage.screenMode !== 'none')    Laya.stage.screenMode = 'none';
+      if (Laya.stage.scaleMode  !== 'showall') Laya.stage.scaleMode  = 'showall';
+      Laya.stage.alignH = 'center';
+      Laya.stage.alignV = 'middle';
+      if (Laya.stage._resetCanvas) Laya.stage._resetCanvas();
+    } catch(e){}
+    return true;
+  }
+
+  // ---------------- ② 输入坐标矩阵 = 实际 CSS 显示尺寸 ----------------
+  /*
+     ★ 这里记下本次挖到的致命坑（实际修法在 ③ 的 fire() 里）：
+
+       Laya 会把「画布显示缩放比」写进 stage 自身的 _transform。例如 1366x768
+       窗口里 clientScale=0.6 -> stage._transform.a = 0.6。而引擎的命中测试
+       MouseManager.check() 对每个节点都会先做
+
+           t.fromParentPoint(point)   ->   _transform.invertTransformPoint(point)
+
+       于是鼠标点被放大 1/0.6 倍，先跑出 stage 自己的矩形 Rect(0,0,720,1280)；
+       而 Scene 节点创建时带 hitTestPrior = true，引擎在 check() 里「自身矩形
+       判定失败就 return false」——整棵显示树一个事件都收不到。表现就是：
+
+         窗口高度 < 1280 时（几乎所有桌面窗口），设计坐标 y > 1280*clientScale
+         的那一整块屏幕（1366x768 下约屏幕 y>460 以下）点击全部静默丢失。
+
+       皮肤选择页的「不了谢谢」正好在 y≈978~1015，永远落在死区里，这就是
+       「点四个字的任何部位都没反应」的根因。而 720x1280 竖屏窗口 clientScale=1、
+       _transform 是单位阵，所以一直正常 —— 之前只在竖屏做无头测试，怎么点都通。
+
+       ⚠ _transform 同时参与渲染：直接把它归一成单位阵会让画面被放大裁切
+       （实测截图可见），所以不能动它。改在输入侧抵消，见 ③ fire()。
+  */
+  function syncInputMatrix(){
+    if (typeof Laya === 'undefined' || !Laya.stage) return;
+    var m = Laya.stage._canvasTransform;
+    if (!m) return;
+    var dw = Laya.stage.designWidth  || 720;
+    var dh = Laya.stage.designHeight || 1280;
+    var vw = window.innerWidth, vh = window.innerHeight, r = dw / dh;
+    var w = Math.min(vw, vh * r), h = w / r, s = w / dw;   // 与 <style> 里的公式保持一致
+    try { m.identity(); m.scale(s, s); m.tx = (vw - w) / 2; m.ty = (vh - h) / 2; } catch(e){}
+  }
+
+  // ---------------- ③ 输入桥接 ----------------
+  var tgt = null, lastTouch = 0;
+
+  // 迷你画布 = Laya 内部那套假 DOM 的画布对象（MouseManager 的监听就挂在它身上）
+  function findTarget(){
+    if (tgt) return tgt;
+    if (typeof Laya === 'undefined') return null;
+    try {
+      var map = Laya.__classmap || {};
+      var c = map['laya.renders.Render'];
+      if (c && c.canvas && typeof c.canvas.dispatchEvent === 'function') { tgt = c.canvas; return tgt; }
+      for (var k in map){                       // 兜底：换构建时类名可能不同，扫一遍
+        var v = map[k];
+        if (v && v.canvas && v.canvas.width && v.canvas.tagName === 'CANVAS'
+            && typeof v.canvas.dispatchEvent === 'function') { tgt = v.canvas; return tgt; }
+      }
+    } catch(e){}
+    return null;
+  }
+
+  function fire(type, e, tid){
+    var o = findTarget();
+    if (!o) return;
+    syncInputMatrix();      // Laya 之后会自己重算并覆盖，派发前再压一次最可靠
+    var x = (e.pageX === undefined) ? e.clientX : e.pageX;
+    var y = (e.pageY === undefined) ? e.clientY : e.pageY;
+
+    // ★ 抵消 stage._transform 带来的坐标放大（原理见 ② 的说明）：
+    //   引擎做矩形判定前会把点放大 1/clientScale 倍，这里先把点按 clientScale
+    //   收回来，命中测试拿到的就是真正的设计坐标。原来屏幕下半部分点不通，根因在此。
+    try {
+      var csx = Laya.stage.clientScaleX || 1, csy = Laya.stage.clientScaleY || 1;
+      var m = Laya.stage._canvasTransform;
+      if (m && (csx !== 1 || csy !== 1)){
+        x = m.tx + csx * (x - m.tx);
+        y = m.ty + csy * (y - m.ty);
+      }
+    } catch(err){}
+
+    var ev = {
+      type: type,
+      clientX: e.clientX, clientY: e.clientY, pageX: x, pageY: y,
+      button: (e.button === undefined ? 0 : e.button),
+      buttons: (e.buttons === undefined ? 1 : e.buttons),
+      detail: 1, wheelDelta: 0, identifier: tid || 0,
+      target: o, currentTarget: o,
+      preventDefault: function(){}, stopPropagation: function(){}
+    };
+    if (type.indexOf('touch') === 0){          // 触摸必须带 changedTouches
+      var t = { identifier: tid || 0, clientX: e.clientX, clientY: e.clientY,
+                pageX: x, pageY: y, screenX: e.clientX, screenY: e.clientY,
+                radiusX: 1, radiusY: 1, force: 1, target: o };
+      ev.changedTouches = [t];
+      ev.touches = (type === 'touchend' || type === 'touchcancel') ? [] : [t];
+      ev.targetTouches = ev.touches;
+    }
+    try { o.dispatchEvent(ev); } catch(err){}
+  }
+
+  function bind(){
+    var w = window;
+    var fresh = function(){ return Date.now() - lastTouch > 700; };  // 触屏后浏览器会补发鼠标事件，丢掉
+    w.addEventListener('mousemove', function(e){ if (fresh()) fire('mousemove', e); }, true);
+    w.addEventListener('mousedown', function(e){ if (!fresh()) return; e.preventDefault(); fire('mousedown', e); }, true);
+    w.addEventListener('mouseup',   function(e){ if (fresh()) fire('mouseup', e); }, true);
+    ['touchstart','touchmove','touchend','touchcancel'].forEach(function(tt){
+      w.addEventListener(tt, function(e){
+        lastTouch = Date.now();
+        for (var i = 0; i < e.changedTouches.length; i++){
+          var t = e.changedTouches[i]; fire(tt, t, t.identifier);
+        }
+      }, true);
+    });
+  }
+
+  function setup(){
+    var ok = tune();
+    if (ok){ syncInputMatrix(); findTarget(); }
+    return ok;
+  }
+
+  if (!setup()){
+    var n = 0, t = setInterval(function(){ if (setup() || ++n > 400) clearInterval(t); }, 25);
+  }
+  bind();
+  // Laya 首屏加载完还会重算一次 _canvasTransform 把我们的覆盖掉，前 20 秒持续压回
+  var t0 = Date.now();
+  var iv = setInterval(function(){
+    syncInputMatrix();
+    if (Date.now() - t0 > 20000) clearInterval(iv);
+  }, 300);
+  window.addEventListener('resize', function(){ setTimeout(function(){ tune(); syncInputMatrix(); }, 80); });
+})();
+</script>
+
+<!--
+  ============================================================================
+  ④ 「不了谢谢」点击兜底 —— 点在这张图上的任何位置都一定有动作
+  ============================================================================
+  怎么来的：皮肤选择页的「不了谢谢」不是按钮，是场景根节点下的**一张图片**
+  （UIRes/image_text_Skip.png，152x37）。实测它的命中矩形与图片像素完全重合
+  （截图量得 x276..427 / y979..1014，节点矩形 x276..428 / y978..1015），
+  所以正常情况下它本来就该点得中。但引擎的显示列表命中在有些环境下会失败
+  （覆盖物 / 层级 / Scene 自带 hitTestPrior 的短路），表现就是「点四个字的
+  任何部位都没反应」。
+
+  所以这里不再依赖引擎的显示列表命中，改为在真实 window 上兜底：
+    按下点 + 抬起点**都落在这张图的矩形内** -> 手动补发它原本的 CLICK 事件
+    （跑的还是原版那套 destroy + ShowUIPanel("Game")，玩法零改动）。
+
+  ⚠ 坐标必须自己算，不能用 e.stageX：Laya 的 Stage.mouseX 是
+    「MouseManager.mouseX / clientScaleX」，只有在画布宽度正好等于设计宽 720 时
+    才等于设计坐标。所以这里用和输入桥接③、<style> 完全相同的适配公式，
+    把 CSS 像素换算成设计坐标，再和 localToGlobal 量出的矩形比对——两头同一坐标系。
+  正常命中时引擎自己会处理，这里用「引擎派发目标是不是它」判定后跳过，不会重复触发。
+  依赖：必须在 main.js 之后（要等 Laya 起来）。
+-->
+<script>
+(function(){
+  var OWNER = {};                        // Handler 的 caller，稳定引用
+  var downPos = null, lastTarget = null, hooked = false;
+  var FB = window.__GQXQC_FALLBACK = { hits:0, found:0, last:'', ready:false };
+
+  // CSS 像素 -> 设计坐标（与入口适配公式一致）
+  function toStage(ev){
+    var dw = (Laya.stage.designWidth  || 720);
+    var dh = (Laya.stage.designHeight || 1280);
+    var vw = window.innerWidth, vh = window.innerHeight, s = Math.min(vw, vh * dw / dh) / dw;
+    var px = (ev.pageX === undefined ? ev.clientX : ev.pageX);
+    var py = (ev.pageY === undefined ? ev.clientY : ev.pageY);
+    return { x: (px - (vw - s * dw) / 2) / s, y: (py - (vh - s * dh) / 2) / s };
+  }
+
+  // 找所有带 SkipBtn 的面板（皮肤选择页 + 解锁挑战页都是同一张图）
+  function findSkip(){
+    var out = [];
+    try {
+      (function w(n, d){
+        if (!n || d > 10) return;
+        try { var b = n.SkipBtn; if (b && b.localToGlobal && b.parent) out.push(b); } catch(e){}
+        try { for (var i = 0; i < n.numChildren; i++) w(n.getChildAt(i), d + 1); } catch(e){}
+      })(Laya.stage, 0);
+    } catch(e){}
+    return out;
+  }
+
+  function rectOf(b){
+    var a = b.localToGlobal(new Laya.Point(0, 0));
+    var c = b.localToGlobal(new Laya.Point(b.width, b.height));
+    return [a.x, a.y, c.x, c.y];        // 设计坐标 x1,y1,x2,y2
+  }
+  function inside(r, x, y){
+    return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
+  }
+
+  function hook(){
+    if (hooked || typeof Laya === 'undefined' || !Laya.stage || !Laya.stage.on) return;
+    hooked = true; FB.ready = true;
+    // 记录引擎自己把事件派发给了谁 -> 判断这次点击要不要兜底
+    Laya.stage.on(Laya.Event.MOUSE_DOWN, OWNER, function(e){ lastTarget = e.target; });
+    Laya.stage.on(Laya.Event.MOUSE_UP,   OWNER, function(e){ lastTarget = e.target; });
+  }
+
+  window.addEventListener('mousedown', function(e){
+    if (!hooked) return;
+    try { downPos = toStage(e); } catch(err){ downPos = null; }
+  }, true);
+
+  window.addEventListener('mouseup', function(e){
+    if (!hooked) return;
+    var d = downPos, up; downPos = null;
+    try { up = toStage(e); } catch(err){ return; }
+    if (!d) return;
+    setTimeout(function(){                 // 等引擎把这次点击处理完再看它派发给了谁
+      try {
+        var list = findSkip();
+        FB.found = list.length;
+        for (var i = 0; i < list.length; i++){
+          var b = list[i];
+          if (lastTarget === b) continue;              // 引擎正常路径已处理，别重复
+          if (!b.visible) continue;
+          var r = rectOf(b);
+          if (inside(r, up.x, up.y) && inside(r, d.x, d.y)){
+            FB.hits++; FB.last = '图 x' + Math.round(r[0]) + '..' + Math.round(r[2]) +
+                                  ' y' + Math.round(r[1]) + '..' + Math.round(r[3]);
+            try { b.event(Laya.Event.CLICK); } catch(err){}   // 跑原版逻辑
+            break;
+          }
+        }
+      } catch(err){}
+      lastTarget = null;
+    }, 0);
+  }, true);
+
+  var n = 0, t = setInterval(function(){ hook(); if (hooked || ++n > 800) clearInterval(t); }, 25);
+})();
+</script>
+
+<!--
+  ============================================================================
+  诊断模式 —— URL 带 ?debug=1 时生效（"开始游戏（诊断模式）.bat" 用它）
+  不带参数时**完全不执行**，不影响正常玩法。
+  ============================================================================
+  用途：把「点了没反应」拆成三种可区分的情况
+    ① 点击总数不涨        -> 页面根本没收到鼠标事件（鼠标驱动/焦点/权限）
+    ② 涨了、红点压住按钮   -> 事件收到了，位置也对：再看面板状态是否变化
+    ③ 涨了但红点偏了      -> 坐标换算问题（缩放/多屏）
+  另外左上角常显入口版本号，一眼就能看出浏览器跑的是不是最新版（排除缓存）。
+-->
+<script>
+(function(){
+  var VER = 'v2026-10-16.3';
+  window.__GQXQC_VER__ = VER;
+  // 标签页标题带版本号：一眼看出浏览器跑的是不是最新版（连控制台都不用开）
+  try { document.title = '滚球向前冲 (本地 Web 版 ' + VER + ')'; } catch(e){}
+  console.log('%c[滚球向前冲] 本地 Web 入口版本 ' + VER +
+              '（输入桥接③ + 点击兜底④ + 下半屏坐标修正）— 按 F9 切换诊断模式',
+              'color:#0a0;font-weight:bold');
+  var FB = window.__GQXQC_FALLBACK || { hits:0, found:0, last:'', ready:false };
+
+  // 开启方式：URL 带 ?debug=1，或游戏中随时按 F9 开关
+  var ON = /[?&]debug=1(&|$)/.test(location.search);
+  var panel = null, timer = null, clicks = 0, lx = -1, ly = -1;
+
+  function mk(css, text){
+    var d = document.createElement('div');
+    d.style.cssText = css;
+    if (text) d.textContent = text;
+    try { document.body.appendChild(d); } catch(e){ return null; }
+    return d;
+  }
+
+  // 场景状态：皮肤弹窗在不在 / 进没进关
+  function scan(){
+    var skin = false, game = false;
+    try {
+      (function w(n, d){
+        if (d > 20 || !n) return;
+        try { if (n.SelectSkinPanel) skin = true; } catch(e){}
+        try { if (n.TimeTex) game = true; } catch(e){}
+        try { for (var i = 0; i < n.numChildren; i++) w(n.getChildAt(i), d + 1); } catch(e){}
+      })(Laya.stage, 0);
+    } catch(e){}
+    return (skin ? '皮肤弹窗在 ' : '') + (game ? '【已进关】' : '');
+  }
+
+  function bridgeTarget(){
+    try {
+      var R = (Laya.__classmap || {})['laya.renders.Render'];
+      return (R && R.canvas && typeof R.canvas.dispatchEvent === 'function')
+        ? 'yes(' + R.canvas.width + 'x' + R.canvas.height + ')' : 'NO';
+    } catch(e){ return 'err'; }
+  }
+
+  function refresh(){
+    if (!panel) return;
+    panel.textContent =
+      '滚球向前冲 诊断 ' + VER +
+      '\n视口 ' + window.innerWidth + 'x' + window.innerHeight +
+        ' @' + (window.devicePixelRatio || 1) +
+      '\n桥接目标 ' + bridgeTarget() +
+      '\n点击 ' + clicks + (lx >= 0 ? '  最后 (' + lx + ',' + ly + ')' : '') +
+      '\n兜底 触发 ' + (FB.hits || 0) + ' 次' + (FB.last ? '  ' + FB.last : '') +
+      '\n不了谢谢 节点 ' + (FB.found || 0) + ' 个' + (FB.ready ? '' : '（兜底未就绪）') +
+      '\n' + (scan() || '（未识别面板）') +
+      '\nF9 关闭';
+  }
+
+  // 捕获阶段：抢在输入桥接之前，保证一定能看到原始鼠标事件
+  function onDown(e){
+    clicks++; lx = e.clientX; ly = e.clientY;
+    var dot = mk('position:fixed;left:' + e.clientX + 'px;top:' + e.clientY + 'px;' +
+      'width:22px;height:22px;background:rgba(255,0,0,.45);border:2px solid #f00;' +
+      'border-radius:50%;z-index:2147483646;pointer-events:none;' +
+      'transform:translate(-50%,-50%);');
+    if (dot) { dot.className = '__gqxqc_dot';
+      setTimeout(function(){ try { dot.remove(); } catch(e){} }, 1800); }
+    refresh();
+  }
+
+  function enable(){
+    if (panel) return;
+    panel = mk('position:fixed;left:8px;top:8px;z-index:2147483647;' +
+      'font:12px/1.55 Consolas,monospace;color:#fff;background:rgba(0,0,0,.78);' +
+      'padding:6px 9px;border-radius:6px;white-space:pre;pointer-events:none;', '');
+    if (panel) panel.id = '__gqxqc_diag';
+    window.addEventListener('mousedown', onDown, true);
+    refresh();
+    timer = setInterval(refresh, 1000);
+  }
+
+  function disable(){
+    if (panel && panel.parentNode) { try { panel.parentNode.removeChild(panel); } catch(e){} }
+    panel = null;
+    window.removeEventListener('mousedown', onDown, true);
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  if (ON) enable();
+
+  window.addEventListener('keydown', function(e){
+    if (e.key === 'F9'){ e.preventDefault(); ON = !ON; if (ON) enable(); else disable(); }
+  }, true);
+})();
+</script>
+</body>
+</html>
